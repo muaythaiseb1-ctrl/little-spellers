@@ -1,0 +1,17 @@
+{
+  "short_name": "Little Spellers",
+  "name": "Little Spellers Learning Game",
+  "icons": [
+    {
+      "src": "/images/design/dragon_mascot.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "any maskable"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#7c3aed",
+  "theme_color": "#7c3aed",
+  "display": "standalone",
+  "orientation": "any"
+}
