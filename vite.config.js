@@ -21,8 +21,9 @@ let sharedStudents = [
   { id: '107', name: 'Henry', grade: 5, pin: '1234', class: '5B' }
 ];
 
-// Clean up offline users every 8 seconds
-setInterval(() => {
+// Clean up offline users every 8 seconds. Do not keep one-off Vite commands
+// such as production builds alive after compilation finishes.
+const onlineUserCleanup = setInterval(() => {
   const now = Date.now();
   for (const name in onlineUsers) {
     if (now - onlineUsers[name].lastActive > 15000) {
@@ -30,6 +31,7 @@ setInterval(() => {
     }
   }
 }, 8000);
+onlineUserCleanup.unref?.();
 
 // https://vite.dev/config/
 export default defineConfig({
