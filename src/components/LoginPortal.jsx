@@ -13,14 +13,17 @@ export default function LoginPortal() {
   const [adminUsername, setAdminUsername] = useState('admin');
   const [adminPassword, setAdminPassword] = useState('');
   const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
  
   // Filter students based on class
   const filteredStudents = students.filter(s => s.class === selectedClass);
  
-  const handleLogin = (e) => {
+  const handleLogin = async (e) => {
     e.preventDefault();
+    if (submitting) return;
     setError('');
- 
+
+    let credentials;
     if (role === 'student') {
       if (!selectedStudent) {
         setError('Please select your name.');
@@ -30,34 +33,19 @@ export default function LoginPortal() {
         setError('Please enter your password.');
         return;
       }
-      const studentObj = students.find(s => s.name === selectedStudent);
-      if (studentObj) {
-        if (studentPassword.trim() === String(studentObj.id)) {
-          loginUser(studentObj.name, 'student', studentObj.grade);
-        } else {
-          setError('Incorrect password. Please use your Student ID.');
-        }
-      }
+      credentials = { role: 'student', studentName: selectedStudent, password: studentPassword.trim() };
     } else if (role === 'teacher') {
-      if (teacherUsername.trim().toLowerCase() !== 'teacher') {
-        setError('Invalid username.');
-        return;
-      }
-      if (teacherPassword !== 'Myclass10') {
-        setError('Incorrect teacher password.');
-        return;
-      }
-      loginUser('Teacher', 'teacher', null);
-    } else if (role === 'admin') {
-      if (adminUsername.trim().toLowerCase() !== 'admin') {
-        setError('Invalid admin credentials.');
-        return;
-      }
-      if (adminPassword !== 'Myschool10') {
-        setError('Incorrect admin password.');
-        return;
-      }
-      loginUser('Administrator', 'admin', null);
+      credentials = { role: 'teacher', username: teacherUsername, password: teacherPassword };
+    } else {
+      credentials = { role: 'admin', username: adminUsername, password: adminPassword };
+    }
+
+    // Passwords are checked on the server, never in this file.
+    setSubmitting(true);
+    const result = await loginUser(credentials);
+    setSubmitting(false);
+    if (!result.ok) {
+      setError(result.error);
     }
   };
 
@@ -213,8 +201,8 @@ export default function LoginPortal() {
             </>
           )}
 
-          <button type="submit" className="submit-btn hover-glow">
-            Start Learning 🚀
+          <button type="submit" className="submit-btn hover-glow" disabled={submitting}>
+            {submitting ? 'Checking...' : 'Start Learning 🚀'}
           </button>
         </form>
       </div>

@@ -1,6 +1,19 @@
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createAuth, createLoginLimiter } from './server/auth.js';
+import { defaultStudents } from './src/data/defaultStudents.js';
+
+// Load passwords and the session secret from .env if it exists (Node 20.12+).
+// On a host, set these as environment variables instead.
+try {
+  process.loadEnvFile();
+} catch {
+  // No .env file: rely on real environment variables.
+}
+
+const auth = createAuth(process.env);
+const loginLimiter = createLoginLimiter();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -20,16 +33,7 @@ let sharedAssignments = [
 ];
 let sharedStudentProgress = {};
 let rosterCustomized = false;
-let sharedStudents = [
-  { id: '100', name: 'Alice', grade: 4, pin: '1234', class: '4A' },
-  { id: '101', name: 'Bob', grade: 4, pin: '1234', class: '4A' },
-  { id: '102', name: 'Charlie', grade: 4, pin: '1234', class: '4B' },
-  { id: '103', name: 'David', grade: 4, pin: '1234', class: '4B' },
-  { id: '104', name: 'Emma', grade: 5, pin: '1234', class: '5A' },
-  { id: '105', name: 'Frank', grade: 5, pin: '1234', class: '5A' },
-  { id: '106', name: 'Grace', grade: 5, pin: '1234', class: '5B' },
-  { id: '107', name: 'Henry', grade: 5, pin: '1234', class: '5B' }
-];
+let sharedStudents = [...defaultStudents];
 
 // Clean up offline users every 8 seconds
 setInterval(() => {
@@ -42,6 +46,23 @@ setInterval(() => {
 }, 8000);
 
 // API Endpoints
+app.post('/api/login', (req, res) => {
+  // Limit per device and account, so one child's typos do not lock out a whole
+  // classroom sharing the school's internet connection.
+  const body = req.body || {};
+  const key = `${req.ip || 'unknown'}|${body.role}|${body.studentName || body.username || ''}`;
+  if (loginLimiter.isBlocked(key)) {
+    return res.status(429).json({ success: false, error: 'Too many wrong tries. Please wait 10 minutes.' });
+  }
+  const result = auth.login(body, sharedStudents);
+  if (!result.ok) {
+    if (result.status === 401) loginLimiter.recordFailure(key);
+    return res.status(result.status).json({ success: false, error: result.error });
+  }
+  loginLimiter.reset(key);
+  res.json({ success: true, user: result.user, token: result.token });
+});
+
 app.post('/api/heartbeat', (req, res) => {
   const { name, role, grade, sessionTime, exerciseTime, isExerciseActive, device } = req.body;
   if (name) {
@@ -93,8 +114,8 @@ app.post('/api/sync-logs', (req, res) => {
 });
 
 app.post('/api/sync-assignments', (req, res) => {
-  const { role, assignments } = req.body;
-  if ((role === 'teacher' || role === 'admin') && Array.isArray(assignments)) {
+  const { assignments } = req.body;
+  if (auth.isStaff(auth.userFromRequest(req)) && Array.isArray(assignments)) {
     sharedAssignments = assignments;
   }
   res.json({ success: true, assignments: sharedAssignments });
@@ -143,20 +164,14 @@ app.post('/api/sync-progress', (req, res) => {
 });
 
 app.post('/api/reset-progress', (req, res) => {
+  if (!auth.isStaff(auth.userFromRequest(req))) {
+    return res.status(403).json({ success: false, error: 'Teacher or admin login required.' });
+  }
   const { studentName } = req.body;
   if (studentName) {
     if (studentName === 'ALL') {
       sharedStudentProgress = {};
-      sharedStudents = [
-        { id: '100', name: 'Alice', grade: 4, pin: '1234', class: '4A' },
-        { id: '101', name: 'Bob', grade: 4, pin: '1234', class: '4A' },
-        { id: '102', name: 'Charlie', grade: 4, pin: '1234', class: '4B' },
-        { id: '103', name: 'David', grade: 4, pin: '1234', class: '4B' },
-        { id: '104', name: 'Emma', grade: 5, pin: '1234', class: '5A' },
-        { id: '105', name: 'Frank', grade: 5, pin: '1234', class: '5A' },
-        { id: '106', name: 'Grace', grade: 5, pin: '1234', class: '5B' },
-        { id: '107', name: 'Henry', grade: 5, pin: '1234', class: '5B' }
-      ];
+      sharedStudents = [...defaultStudents];
       rosterCustomized = false;
     } else {
       delete sharedStudentProgress[studentName];
@@ -166,8 +181,8 @@ app.post('/api/reset-progress', (req, res) => {
 });
 
 app.post('/api/sync-students', (req, res) => {
-  const { role, students } = req.body;
-  if (Array.isArray(students) && (role === 'teacher' || role === 'admin')) {
+  const { students } = req.body;
+  if (Array.isArray(students) && auth.isStaff(auth.userFromRequest(req))) {
     const isDefault = (list) => {
       return list.length === 8 && list.some(s => s.name === 'Alice') && list.some(s => s.name === 'Bob');
     };
@@ -183,6 +198,9 @@ app.post('/api/sync-students', (req, res) => {
 });
 
 app.post('/api/clear-logs', (req, res) => {
+  if (!auth.isStaff(auth.userFromRequest(req))) {
+    return res.status(403).json({ success: false, error: 'Teacher or admin login required.' });
+  }
   sessionLogs.length = 0;
   res.json({ success: true, logs: [] });
 });

@@ -1,5 +1,7 @@
-import { defineConfig } from 'vite'
+import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
+import { createAuth, createLoginLimiter } from './server/auth.js'
+import { defaultStudents } from './src/data/defaultStudents.js'
 
 // In-memory data store for local network synchronization
 const onlineUsers = {};
@@ -10,16 +12,7 @@ let sharedAssignments = [
 ];
 let sharedStudentProgress = {};
 let rosterCustomized = false;
-let sharedStudents = [
-  { id: '100', name: 'Alice', grade: 4, pin: '1234', class: '4A' },
-  { id: '101', name: 'Bob', grade: 4, pin: '1234', class: '4A' },
-  { id: '102', name: 'Charlie', grade: 4, pin: '1234', class: '4B' },
-  { id: '103', name: 'David', grade: 4, pin: '1234', class: '4B' },
-  { id: '104', name: 'Emma', grade: 5, pin: '1234', class: '5A' },
-  { id: '105', name: 'Frank', grade: 5, pin: '1234', class: '5A' },
-  { id: '106', name: 'Grace', grade: 5, pin: '1234', class: '5B' },
-  { id: '107', name: 'Henry', grade: 5, pin: '1234', class: '5B' }
-];
+let sharedStudents = [...defaultStudents];
 
 // Clean up offline users every 8 seconds. Do not keep one-off Vite commands
 // such as production builds alive after compilation finishes.
@@ -34,12 +27,16 @@ const onlineUserCleanup = setInterval(() => {
 onlineUserCleanup.unref?.();
 
 // https://vite.dev/config/
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   plugins: [
     react(),
     {
       name: 'api-sync-server',
       configureServer(server) {
+        // Passwords come from .env (not prefixed with VITE_, so they never reach the browser).
+        const auth = createAuth({ ...loadEnv(mode, process.cwd(), ''), ...process.env });
+        const loginLimiter = createLoginLimiter();
+
         server.middlewares.use((req, res, next) => {
           const urlPath = req.url.split('?')[0];
           
@@ -58,6 +55,31 @@ export default defineConfig({
                 }
               });
             };
+            const isStaffRequest = () => auth.isStaff(auth.userFromRequest(req));
+            const sendError = (status, error) => {
+              res.statusCode = status;
+              res.end(JSON.stringify({ success: false, error }));
+            };
+
+            if (urlPath === '/api/login' && req.method === 'POST') {
+              getBody((data) => {
+                // Limit per device and account, so one child's typos do not lock out a whole
+                // classroom sharing the school's internet connection.
+                const body = data || {};
+                const key = `${req.socket?.remoteAddress || 'unknown'}|${body.role}|${body.studentName || body.username || ''}`;
+                if (loginLimiter.isBlocked(key)) {
+                  return sendError(429, 'Too many wrong tries. Please wait 10 minutes.');
+                }
+                const result = auth.login(body, sharedStudents);
+                if (!result.ok) {
+                  if (result.status === 401) loginLimiter.recordFailure(key);
+                  return sendError(result.status, result.error);
+                }
+                loginLimiter.reset(key);
+                res.end(JSON.stringify({ success: true, user: result.user, token: result.token }));
+              });
+              return;
+            }
 
             if (urlPath === '/api/heartbeat' && req.method === 'POST') {
               getBody((data) => {
@@ -124,8 +146,8 @@ export default defineConfig({
 
             if (urlPath === '/api/sync-assignments' && req.method === 'POST') {
               getBody((data) => {
-                const { assignments, role } = data;
-                if (Array.isArray(assignments) && (role === 'teacher' || role === 'admin')) {
+                const { assignments } = data;
+                if (Array.isArray(assignments) && isStaffRequest()) {
                   sharedAssignments = assignments;
                 }
                 res.end(JSON.stringify({ success: true, assignments: sharedAssignments }));
@@ -189,21 +211,16 @@ export default defineConfig({
             }
 
             if (urlPath === '/api/reset-progress' && req.method === 'POST') {
+              if (!isStaffRequest()) {
+                sendError(403, 'Teacher or admin login required.');
+                return;
+              }
               getBody((data) => {
                 const { studentName } = data;
                 if (studentName) {
                   if (studentName === 'ALL') {
                     sharedStudentProgress = {};
-                    sharedStudents = [
-                      { id: '100', name: 'Alice', grade: 4, pin: '1234', class: '4A' },
-                      { id: '101', name: 'Bob', grade: 4, pin: '1234', class: '4A' },
-                      { id: '102', name: 'Charlie', grade: 4, pin: '1234', class: '4B' },
-                      { id: '103', name: 'David', grade: 4, pin: '1234', class: '4B' },
-                      { id: '104', name: 'Emma', grade: 5, pin: '1234', class: '5A' },
-                      { id: '105', name: 'Frank', grade: 5, pin: '1234', class: '5A' },
-                      { id: '106', name: 'Grace', grade: 5, pin: '1234', class: '5B' },
-                      { id: '107', name: 'Henry', grade: 5, pin: '1234', class: '5B' }
-                    ];
+                    sharedStudents = [...defaultStudents];
                     rosterCustomized = false;
                   } else {
                     delete sharedStudentProgress[studentName];
@@ -216,13 +233,13 @@ export default defineConfig({
 
             if (urlPath === '/api/sync-students' && req.method === 'POST') {
               getBody((data) => {
-                const { role, students } = data;
+                const { students } = data;
                 if (Array.isArray(students)) {
                   const isDefault = (list) => {
                     return list.length === 8 && list.some(s => s.name === 'Alice') && list.some(s => s.name === 'Bob');
                   };
                   
-                  if (role === 'teacher' || role === 'admin') {
+                  if (isStaffRequest()) {
                     if (!isDefault(students)) {
                       sharedStudents = students;
                       rosterCustomized = true;
@@ -242,6 +259,10 @@ export default defineConfig({
             }
 
             if (urlPath === '/api/clear-logs' && req.method === 'POST') {
+              if (!isStaffRequest()) {
+                sendError(403, 'Teacher or admin login required.');
+                return;
+              }
               sessionLogs.length = 0;
               res.end(JSON.stringify({ success: true, logs: [] }));
               return;
@@ -252,4 +273,4 @@ export default defineConfig({
       }
     }
   ],
-})
+}))

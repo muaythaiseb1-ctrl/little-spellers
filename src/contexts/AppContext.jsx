@@ -125,7 +125,14 @@ export const AppProvider = ({ children }) => {
   // 3. Current User Session
   const [currentUser, setCurrentUser] = useState(() => {
     const saved = sessionStorage.getItem('little_spellers_session');
-    return saved ? JSON.parse(saved) : null;
+    if (!saved) return null;
+    try {
+      const parsed = JSON.parse(saved);
+      // Sessions from before server-side login have no token: log them out.
+      return parsed && parsed.token ? parsed : null;
+    } catch {
+      return null;
+    }
   });
 
   // 4. Session Logs for Admin (Persistent)
@@ -227,6 +234,15 @@ export const AppProvider = ({ children }) => {
     return 'PC';
   };
 
+  // Headers for API calls, including the login token so the server can
+  // check who is asking instead of trusting a role sent by the browser.
+  function apiHeaders() {
+    const headers = { 'Content-Type': 'application/json' };
+    const token = currentUserRef.current?.token;
+    if (token) headers.Authorization = `Bearer ${token}`;
+    return headers;
+  }
+
   // Sync session logs with server in-memory db
   function syncLogsWithServer(logsToSync) {
     const savedLogs = localStorage.getItem('little_spellers_logs');
@@ -255,9 +271,8 @@ export const AppProvider = ({ children }) => {
   function syncAssignmentsWithServer() {
     fetch('/api/sync-assignments', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: apiHeaders(),
       body: JSON.stringify({ 
-        role: currentUserRef.current?.role,
         assignments: (currentUserRef.current?.role === 'teacher' || currentUserRef.current?.role === 'admin') ? assignmentsRef.current : null 
       })
     })
@@ -300,9 +315,8 @@ export const AppProvider = ({ children }) => {
   function syncStudentsWithServer() {
     fetch('/api/sync-students', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: apiHeaders(),
       body: JSON.stringify({ 
-        role: currentUserRef.current?.role,
         students: studentsRef.current 
       })
     })
@@ -443,11 +457,30 @@ export const AppProvider = ({ children }) => {
     });
   };
 
-  // Login handler
-  const loginUser = (name, role, grade) => {
-    const sessionData = { name, role, grade };
+  // Login handler: the server checks the password and returns a signed token.
+  // Resolves to { ok: true } or { ok: false, error }.
+  const loginUser = async (credentials) => {
+    let data;
+    try {
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(credentials)
+      });
+      data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        return { ok: false, error: data?.error || 'Login failed. Please try again.' };
+      }
+    } catch (err) {
+      console.error('Login request error:', err);
+      return { ok: false, error: 'Cannot reach the server. Please check your connection.' };
+    }
+
+    const { name, role, grade } = data.user;
+    const sessionData = { name, role, grade, token: data.token };
     const start = Date.now();
     
+    currentUserRef.current = sessionData;
     sessionStorage.setItem('little_spellers_session', JSON.stringify(sessionData));
     sessionStorage.setItem('little_spellers_session_start', start.toString());
     
@@ -456,6 +489,7 @@ export const AppProvider = ({ children }) => {
     setCurrentUser(sessionData);
     
     logSessionEvent(name, role, grade, 'Login');
+    return { ok: true };
   };
 
   // Logout handler
@@ -525,7 +559,7 @@ export const AppProvider = ({ children }) => {
     // Notify server to delete progress for this student
     fetch('/api/reset-progress', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: apiHeaders(),
       body: JSON.stringify({ studentName: studentId })
     })
       .then(res => res.json())
@@ -575,7 +609,8 @@ export const AppProvider = ({ children }) => {
     setSessionLogs([]);
     localStorage.setItem('little_spellers_logs', JSON.stringify([]));
     fetch('/api/clear-logs', {
-      method: 'POST'
+      method: 'POST',
+      headers: apiHeaders()
     }).catch(err => console.error("Clear logs server error:", err));
   };
 
